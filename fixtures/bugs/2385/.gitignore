@@ -1,0 +1,4 @@
+gen-*
+*.log
+fred/
+go-ext/
