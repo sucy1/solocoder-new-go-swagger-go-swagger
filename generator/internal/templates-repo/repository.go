@@ -10,6 +10,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"text/template"
@@ -93,28 +94,49 @@ func (t *Repository) LoadDefaults(assets map[string][]byte) error {
 
 // LoadDir will walk the specified path and add each .gotmpl file it finds to the repository.
 func (t *Repository) LoadDir(templatePath string) error {
-	err := filepath.Walk(templatePath, func(path string, _ os.FileInfo, err error) error {
-		if strings.HasSuffix(path, ".gotmpl") {
-			if assetName, e := filepath.Rel(templatePath, path); e == nil {
-				if data, e := os.ReadFile(path); e == nil { //nolint:gosec // pre-existing: template loading from user-specified directory
-					if ee := t.AddFile(assetName, string(data)); ee != nil {
-						return fmt.Errorf("could not add template: %w", ee)
-					}
-				}
-				// Non-readable files are skipped
-			}
+	info, err := os.Stat(templatePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("could not complete template processing in directory %q: template directory does not exist: %s", templatePath, templatePath)
 		}
+		return fmt.Errorf("could not complete template processing in directory %q: %w", templatePath, err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("could not complete template processing in directory %q: template path is not a directory", templatePath)
+	}
 
+	var templateCount int
+	err = filepath.Walk(templatePath, func(path string, _ os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 
-		// Non-template files are skipped
+		if strings.HasSuffix(path, ".gotmpl") {
+			templateCount++
+			assetName, e := filepath.Rel(templatePath, path)
+			if e != nil {
+				return fmt.Errorf("could not resolve relative path for template %q: %w", path, e)
+			}
+			data, e := os.ReadFile(path) //nolint:gosec // pre-existing: template loading from user-specified directory
+			if e != nil {
+				return fmt.Errorf("could not read template file %q: %w", path, e)
+			}
+			if ee := t.AddFile(assetName, string(data)); ee != nil {
+				return fmt.Errorf("could not add template %q: %w", assetName, ee)
+			}
+		}
+
 		return nil
 	})
 	if err != nil {
 		return fmt.Errorf("could not complete template processing in directory %q: %w", templatePath, err)
 	}
+
+	if templateCount == 0 {
+		return fmt.Errorf("no template files (.gotmpl) found in template directory: %s", templatePath)
+	}
+
+	log.Printf("loaded %d template(s) from directory: %s", templateCount, templatePath)
 	return nil
 }
 
@@ -174,10 +196,21 @@ func (t *Repository) Get(name string) (*template.Template, error) {
 	templ, found := t.templates[name]
 
 	if !found {
-		return templ, fmt.Errorf("template doesn't exist %s", name)
+		available := t.listAvailableTemplates()
+		return templ, fmt.Errorf("template doesn't exist %s\nAvailable templates: %s\n\nIf you are using a custom template directory (--template-dir), ensure this template is defined in that directory as %s.gotmpl", name, strings.Join(available, ", "), name)
 	}
 
 	return t.addDependencies(templ)
+}
+
+// listAvailableTemplates returns a sorted list of available template names.
+func (t *Repository) listAvailableTemplates() []string {
+	names := make([]string, 0, len(t.templates))
+	for name := range t.templates {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // DumpTemplates prints out a dump of all the defined templates, where they are defined and what their dependencies are.
@@ -268,7 +301,8 @@ func (t *Repository) addDependencies(templ *template.Template) (*template.Templa
 
 			// Still don't have it, return an error
 			if tt == nil {
-				return templ, fmt.Errorf("could not find template %s", dep)
+				available := t.listAvailableTemplates()
+				return templ, fmt.Errorf("could not find template %s (required by %s)\nAvailable templates: %s\n\nIf you are using a custom template directory (--template-dir), ensure this dependency template is defined in that directory as %s.gotmpl", dep, name, strings.Join(available, ", "), dep)
 			}
 			var err error
 

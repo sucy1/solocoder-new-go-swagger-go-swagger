@@ -63,6 +63,11 @@ It aims to represent the contract of your API with a language agnostic descripti
 		log.Fatal(err)
 	}
 
+	_, err = parser.AddCommand("merge", "merge swagger specs with strict conflict detection", "merge multiple spec files into one, detecting and reporting endpoint path conflicts", &commands.MergeSpec{})
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	_, err = parser.AddCommand("diff", "diff swagger documents", "diff specs showing which changes will break existing clients", &commands.DiffCommand{})
 	if err != nil {
 		log.Fatal(err)

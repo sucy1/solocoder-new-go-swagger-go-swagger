@@ -114,6 +114,11 @@ func (t *typeResolver) ResolveSchema(schema *spec.Schema, isAnonymous, isRequire
 		return result, nil
 	}
 
+	schema, err = applyAllExtensionHandlers(schema)
+	if err != nil {
+		return result, err
+	}
+
 	extType, isExternalType := t.resolveExternalType(schema.Extensions)
 	if isExternalType {
 		tpe, pkg, alias := t.knownDefGoType(t.ModelName, *schema, t.goTypeName)
