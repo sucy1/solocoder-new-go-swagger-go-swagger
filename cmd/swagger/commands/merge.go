@@ -90,7 +90,7 @@ func (c *MergeSpec) MergeFiles(primaryFile string, mixinFiles []string, _ io.Wri
 	}
 	primary := primaryDoc.Spec()
 
-	primaryPaths := collectEndpointPaths(primary, primaryFile)
+	primaryPaths, primaryPathOriginals := collectEndpointPaths(primary, primaryFile)
 
 	mixins := make([]*spec.Swagger, 0, len(mixinFiles))
 	for _, mixinFile := range mixinFiles {
@@ -102,18 +102,31 @@ func (c *MergeSpec) MergeFiles(primaryFile string, mixinFiles []string, _ io.Wri
 			return result, lerr
 		}
 
-		mixinPaths := collectEndpointPaths(mixin.Spec(), mixinFile)
+		mixinPaths, mixinPathOriginals := collectEndpointPaths(mixin.Spec(), mixinFile)
 		for method, paths := range mixinPaths {
-			for path, source := range paths {
-				if primaryPaths, ok := primaryPaths[method]; ok {
-					if _, exists := primaryPaths[path]; exists {
+			for normalizedPath, source := range paths {
+				if primaryPathsMethod, ok := primaryPaths[method]; ok {
+					if originalPrimaryPath, exists := primaryPathsMethod[normalizedPath]; exists {
+						// Found a conflict, use the original path from mixin for display
+						originalMixinPath := mixinPathOriginals[method][normalizedPath]
 						result.pathConflicts = append(result.pathConflicts, pathConflict{
 							Method: method,
-							Path:   path,
+							Path:   fmt.Sprintf("%s (equivalent to %s from %s)", originalMixinPath, originalPrimaryPath, primaryFile),
 							Source: source,
 						})
 					}
 				}
+			}
+		}
+		// Merge mixin paths into primary paths for subsequent conflict detection
+		for method, paths := range mixinPaths {
+			if _, ok := primaryPaths[method]; !ok {
+				primaryPaths[method] = make(map[string]string)
+				primaryPathOriginals[method] = make(map[string]string)
+			}
+			for normalizedPath := range paths {
+				primaryPaths[method][normalizedPath] = mixinFile
+				primaryPathOriginals[method][normalizedPath] = mixinPathOriginals[method][normalizedPath]
 			}
 		}
 
@@ -128,67 +141,95 @@ func (c *MergeSpec) MergeFiles(primaryFile string, mixinFiles []string, _ io.Wri
 }
 
 // collectEndpointPaths collects all endpoint paths from a swagger spec.
-// Returns a map of method -> path -> source file.
-func collectEndpointPaths(swspec *spec.Swagger, source string) map[string]map[string]string {
-	result := make(map[string]map[string]string)
+// Returns two maps:
+//   - normalized: method -> normalized path -> source (for conflict detection)
+//   - originals: method -> normalized path -> original path (for display)
+//
+// Path normalization handles equivalent path parameter syntax:
+//   - /users/:id and /users/{userId} both normalize to /users/{param}
+func collectEndpointPaths(swspec *spec.Swagger, source string) (map[string]map[string]string, map[string]map[string]string) {
+	normalized := make(map[string]map[string]string)
+	originals := make(map[string]map[string]string)
 
 	if swspec == nil || swspec.Paths == nil {
-		return result
+		return normalized, originals
+	}
+
+	addPath := func(method, path string) {
+		norm := normalizePath(path)
+		if _, ok := normalized[method]; !ok {
+			normalized[method] = make(map[string]string)
+			originals[method] = make(map[string]string)
+		}
+		normalized[method][norm] = source
+		originals[method][norm] = path
 	}
 
 	for path, pathItem := range swspec.Paths.Paths {
 		// GET
 		if pathItem.Get != nil {
-			if _, ok := result["GET"]; !ok {
-				result["GET"] = make(map[string]string)
-			}
-			result["GET"][path] = source
+			addPath("GET", path)
 		}
 		// POST
 		if pathItem.Post != nil {
-			if _, ok := result["POST"]; !ok {
-				result["POST"] = make(map[string]string)
-			}
-			result["POST"][path] = source
+			addPath("POST", path)
 		}
 		// PUT
 		if pathItem.Put != nil {
-			if _, ok := result["PUT"]; !ok {
-				result["PUT"] = make(map[string]string)
-			}
-			result["PUT"][path] = source
+			addPath("PUT", path)
 		}
 		// DELETE
 		if pathItem.Delete != nil {
-			if _, ok := result["DELETE"]; !ok {
-				result["DELETE"] = make(map[string]string)
-			}
-			result["DELETE"][path] = source
+			addPath("DELETE", path)
 		}
 		// PATCH
 		if pathItem.Patch != nil {
-			if _, ok := result["PATCH"]; !ok {
-				result["PATCH"] = make(map[string]string)
-			}
-			result["PATCH"][path] = source
+			addPath("PATCH", path)
 		}
 		// HEAD
 		if pathItem.Head != nil {
-			if _, ok := result["HEAD"]; !ok {
-				result["HEAD"] = make(map[string]string)
-			}
-			result["HEAD"][path] = source
+			addPath("HEAD", path)
 		}
 		// OPTIONS
 		if pathItem.Options != nil {
-			if _, ok := result["OPTIONS"]; !ok {
-				result["OPTIONS"] = make(map[string]string)
-			}
-			result["OPTIONS"][path] = source
+			addPath("OPTIONS", path)
 		}
 	}
 
-	return result
+	return normalized, originals
+}
+
+// normalizePath normalizes a URL path for equivalence comparison.
+// It replaces all path parameter segments with a canonical placeholder,
+// making /users/:id and /users/{userId} equivalent.
+//
+// Supported parameter syntaxes:
+//   - {name}   - OpenAPI/Swagger style
+//   - :name    - Express/Sinatra style
+//   - <name>   - Flask/Werkzeug style
+func normalizePath(path string) string {
+	segments := strings.Split(path, "/")
+	for i, seg := range segments {
+		if seg == "" {
+			continue
+		}
+		// OpenAPI/Swagger style: {paramName}
+		if strings.HasPrefix(seg, "{") && strings.HasSuffix(seg, "}") {
+			segments[i] = "{param}"
+			continue
+		}
+		// Express/Sinatra style: :paramName
+		if strings.HasPrefix(seg, ":") {
+			segments[i] = "{param}"
+			continue
+		}
+		// Flask/Werkzeug style: <paramName> or <converter:paramName>
+		if strings.HasPrefix(seg, "<") && strings.HasSuffix(seg, ">") {
+			segments[i] = "{param}"
+			continue
+		}
+	}
+	return strings.Join(segments, "/")
 }
 
 // formatPathConflicts formats path conflicts for display.

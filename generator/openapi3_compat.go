@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unsafe"
 
 	"github.com/go-openapi/spec"
 	"gopkg.in/yaml.v2"
@@ -19,6 +20,7 @@ const (
 	swagger2ParamRefPrefix   = "#/parameters/"
 	openapi3RespRefPrefix    = "#/components/responses/"
 	swagger2RespRefPrefix    = "#/responses/"
+	maxRecursionDepth        = 1000
 )
 
 // OpenAPI3Converter converts OpenAPI 3.x specs to Swagger 2.0 compatible format.
@@ -90,7 +92,8 @@ func (c *OpenAPI3Converter) Convert(data []byte) ([]byte, error) {
 		}
 	}
 
-	if err := c.convertMap(specMap); err != nil {
+	visited := make(map[uintptr]bool)
+	if err := c.convertMap(specMap, visited, 0); err != nil {
 		return nil, err
 	}
 
@@ -102,7 +105,18 @@ func (c *OpenAPI3Converter) Convert(data []byte) ([]byte, error) {
 }
 
 // convertMap recursively converts the spec map.
-func (c *OpenAPI3Converter) convertMap(m map[string]interface{}) error {
+func (c *OpenAPI3Converter) convertMap(m map[string]interface{}, visited map[uintptr]bool, depth int) error {
+	if depth > maxRecursionDepth {
+		return fmt.Errorf("maximum recursion depth exceeded (%d) while converting spec map, possible circular reference", maxRecursionDepth)
+	}
+
+	// Check for circular reference using map pointer
+	mapPtr := uintptr(unsafe.Pointer(&m))
+	if visited[mapPtr] {
+		return nil
+	}
+	visited[mapPtr] = true
+	defer delete(visited, mapPtr)
 	// Handle components -> definitions, parameters, responses
 	if components, ok := m["components"]; ok {
 		if componentsMap, ok := components.(map[string]interface{}); ok {
@@ -132,7 +146,7 @@ func (c *OpenAPI3Converter) convertMap(m map[string]interface{}) error {
 						if paramsList, ok := params.([]interface{}); ok {
 							for i, param := range paramsList {
 								if paramMap, ok := param.(map[string]interface{}); ok {
-									if err := c.convertRefsInMap(paramMap); err != nil {
+									if err := c.convertRefsInMap(paramMap, visited, depth+1); err != nil {
 										return fmt.Errorf("path %s parameter %d: %w", pathName, i, err)
 									}
 								}
@@ -145,7 +159,7 @@ func (c *OpenAPI3Converter) convertMap(m map[string]interface{}) error {
 						methodLower := strings.ToLower(method)
 						if isHTTPMethod(methodLower) {
 							if opMap, ok := op.(map[string]interface{}); ok {
-								if err := c.convertRefsInMap(opMap); err != nil {
+								if err := c.convertRefsInMap(opMap, visited, depth+1); err != nil {
 									return fmt.Errorf("path %s %s: %w", pathName, method, err)
 								}
 							}
@@ -161,7 +175,7 @@ func (c *OpenAPI3Converter) convertMap(m map[string]interface{}) error {
 		if defsMap, ok := definitions.(map[string]interface{}); ok {
 			for defName, def := range defsMap {
 				if defMap, ok := def.(map[string]interface{}); ok {
-					if err := c.convertRefsInMap(defMap); err != nil {
+					if err := c.convertRefsInMap(defMap, visited, depth+1); err != nil {
 						return fmt.Errorf("definition %s: %w", defName, err)
 					}
 				}
@@ -174,7 +188,7 @@ func (c *OpenAPI3Converter) convertMap(m map[string]interface{}) error {
 		if paramsMap, ok := parameters.(map[string]interface{}); ok {
 			for paramName, param := range paramsMap {
 				if paramMap, ok := param.(map[string]interface{}); ok {
-					if err := c.convertRefsInMap(paramMap); err != nil {
+					if err := c.convertRefsInMap(paramMap, visited, depth+1); err != nil {
 						return fmt.Errorf("parameter %s: %w", paramName, err)
 					}
 				}
@@ -187,7 +201,7 @@ func (c *OpenAPI3Converter) convertMap(m map[string]interface{}) error {
 		if respMap, ok := responses.(map[string]interface{}); ok {
 			for respName, resp := range respMap {
 				if rMap, ok := resp.(map[string]interface{}); ok {
-					if err := c.convertRefsInMap(rMap); err != nil {
+					if err := c.convertRefsInMap(rMap, visited, depth+1); err != nil {
 						return fmt.Errorf("response %s: %w", respName, err)
 					}
 				}
@@ -199,7 +213,19 @@ func (c *OpenAPI3Converter) convertMap(m map[string]interface{}) error {
 }
 
 // convertRefsInMap converts all $ref values in a map from OpenAPI 3.x format to Swagger 2.0 format.
-func (c *OpenAPI3Converter) convertRefsInMap(m map[string]interface{}) error {
+// Includes cycle detection to prevent infinite recursion on circular references.
+func (c *OpenAPI3Converter) convertRefsInMap(m map[string]interface{}, visited map[uintptr]bool, depth int) error {
+	if depth > maxRecursionDepth {
+		return fmt.Errorf("maximum recursion depth exceeded (%d) while converting refs, possible circular reference", maxRecursionDepth)
+	}
+
+	mapPtr := uintptr(unsafe.Pointer(&m))
+	if visited[mapPtr] {
+		return nil
+	}
+	visited[mapPtr] = true
+	defer delete(visited, mapPtr)
+
 	for key, value := range m {
 		// Direct $ref
 		if key == "$ref" {
@@ -211,7 +237,7 @@ func (c *OpenAPI3Converter) convertRefsInMap(m map[string]interface{}) error {
 
 		switch v := value.(type) {
 		case map[string]interface{}:
-			if err := c.convertRefsInMap(v); err != nil {
+			if err := c.convertRefsInMap(v, visited, depth+1); err != nil {
 				return err
 			}
 			// Also handle nullable -> x-nullable conversion
@@ -228,7 +254,7 @@ func (c *OpenAPI3Converter) convertRefsInMap(m map[string]interface{}) error {
 		case []interface{}:
 			for i, item := range v {
 				if itemMap, ok := item.(map[string]interface{}); ok {
-					if err := c.convertRefsInMap(itemMap); err != nil {
+					if err := c.convertRefsInMap(itemMap, visited, depth+1); err != nil {
 						return err
 					}
 				}
@@ -275,9 +301,22 @@ func isHTTPMethod(method string) bool {
 // Also handles nullable property conversion:
 // - schema.Nullable -> schema.Extensions["x-nullable"]
 func ConvertOpenAPI3SchemaRefs(schema *spec.Schema) {
-	if schema == nil {
+	visited := make(map[uintptr]bool)
+	convertOpenAPI3SchemaRefsInternal(schema, visited, 0)
+}
+
+func convertOpenAPI3SchemaRefsInternal(schema *spec.Schema, visited map[uintptr]bool, depth int) {
+	if schema == nil || depth > maxRecursionDepth {
 		return
 	}
+
+	// Check for circular reference using schema pointer
+	schemaPtr := uintptr(unsafe.Pointer(schema))
+	if visited[schemaPtr] {
+		return
+	}
+	visited[schemaPtr] = true
+	defer delete(visited, schemaPtr)
 
 	// Convert Ref
 	if schema.Ref.String() != "" {
@@ -298,11 +337,11 @@ func ConvertOpenAPI3SchemaRefs(schema *spec.Schema) {
 
 	// Recursively convert items
 	if schema.Items != nil && schema.Items.Schema != nil {
-		ConvertOpenAPI3SchemaRefs(schema.Items.Schema)
+		convertOpenAPI3SchemaRefsInternal(schema.Items.Schema, visited, depth+1)
 	}
 	if schema.Items != nil && len(schema.Items.Schemas) > 0 {
 		for i := range schema.Items.Schemas {
-			ConvertOpenAPI3SchemaRefs(&schema.Items.Schemas[i])
+			convertOpenAPI3SchemaRefsInternal(&schema.Items.Schemas[i], visited, depth+1)
 		}
 	}
 
@@ -310,39 +349,39 @@ func ConvertOpenAPI3SchemaRefs(schema *spec.Schema) {
 	if schema.Properties != nil {
 		for name := range schema.Properties {
 			prop := schema.Properties[name]
-			ConvertOpenAPI3SchemaRefs(&prop)
+			convertOpenAPI3SchemaRefsInternal(&prop, visited, depth+1)
 			schema.Properties[name] = prop
 		}
 	}
 
 	// Recursively convert additionalProperties
 	if schema.AdditionalProperties != nil && schema.AdditionalProperties.Schema != nil {
-		ConvertOpenAPI3SchemaRefs(schema.AdditionalProperties.Schema)
+		convertOpenAPI3SchemaRefsInternal(schema.AdditionalProperties.Schema, visited, depth+1)
 	}
 
 	// Recursively convert allOf
 	if len(schema.AllOf) > 0 {
 		for i := range schema.AllOf {
-			ConvertOpenAPI3SchemaRefs(&schema.AllOf[i])
+			convertOpenAPI3SchemaRefsInternal(&schema.AllOf[i], visited, depth+1)
 		}
 	}
 
 	// Recursively convert anyOf
 	if len(schema.AnyOf) > 0 {
 		for i := range schema.AnyOf {
-			ConvertOpenAPI3SchemaRefs(&schema.AnyOf[i])
+			convertOpenAPI3SchemaRefsInternal(&schema.AnyOf[i], visited, depth+1)
 		}
 	}
 
 	// Recursively convert oneOf
 	if len(schema.OneOf) > 0 {
 		for i := range schema.OneOf {
-			ConvertOpenAPI3SchemaRefs(&schema.OneOf[i])
+			convertOpenAPI3SchemaRefsInternal(&schema.OneOf[i], visited, depth+1)
 		}
 	}
 
 	// Recursively convert not
 	if schema.Not != nil {
-		ConvertOpenAPI3SchemaRefs(schema.Not)
+		convertOpenAPI3SchemaRefsInternal(schema.Not, visited, depth+1)
 	}
 }
