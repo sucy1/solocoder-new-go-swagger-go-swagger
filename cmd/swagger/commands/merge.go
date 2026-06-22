@@ -106,8 +106,8 @@ func (c *MergeSpec) MergeFiles(primaryFile string, mixinFiles []string, _ io.Wri
 		for method, paths := range mixinPaths {
 			for normalizedPath, source := range paths {
 				if primaryPathsMethod, ok := primaryPaths[method]; ok {
-					if originalPrimaryPath, exists := primaryPathsMethod[normalizedPath]; exists {
-						// Found a conflict, use the original path from mixin for display
+					if _, exists := primaryPathsMethod[normalizedPath]; exists {
+						originalPrimaryPath := primaryPathOriginals[method][normalizedPath]
 						originalMixinPath := mixinPathOriginals[method][normalizedPath]
 						result.pathConflicts = append(result.pathConflicts, pathConflict{
 							Method: method,

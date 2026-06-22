@@ -110,13 +110,11 @@ func (c *OpenAPI3Converter) convertMap(m map[string]interface{}, visited map[uin
 		return fmt.Errorf("maximum recursion depth exceeded (%d) while converting spec map, possible circular reference", maxRecursionDepth)
 	}
 
-	// Check for circular reference using map pointer
 	mapPtr := uintptr(unsafe.Pointer(&m))
 	if visited[mapPtr] {
-		return nil
+		return fmt.Errorf("circular $ref detected at map pointer 0x%x, depth %d", mapPtr, depth)
 	}
 	visited[mapPtr] = true
-	defer delete(visited, mapPtr)
 	// Handle components -> definitions, parameters, responses
 	if components, ok := m["components"]; ok {
 		if componentsMap, ok := components.(map[string]interface{}); ok {
@@ -221,10 +219,9 @@ func (c *OpenAPI3Converter) convertRefsInMap(m map[string]interface{}, visited m
 
 	mapPtr := uintptr(unsafe.Pointer(&m))
 	if visited[mapPtr] {
-		return nil
+		return fmt.Errorf("circular $ref detected at map pointer 0x%x, depth %d", mapPtr, depth)
 	}
 	visited[mapPtr] = true
-	defer delete(visited, mapPtr)
 
 	for key, value := range m {
 		// Direct $ref
@@ -305,18 +302,16 @@ func ConvertOpenAPI3SchemaRefs(schema *spec.Schema) {
 	convertOpenAPI3SchemaRefsInternal(schema, visited, 0)
 }
 
-func convertOpenAPI3SchemaRefsInternal(schema *spec.Schema, visited map[uintptr]bool, depth int) {
+func convertOpenAPI3SchemaRefsInternal(schema *spec.Schema, visited map[uintptr]bool, depth int) error {
 	if schema == nil || depth > maxRecursionDepth {
-		return
+		return nil
 	}
 
-	// Check for circular reference using schema pointer
 	schemaPtr := uintptr(unsafe.Pointer(schema))
 	if visited[schemaPtr] {
-		return
+		return fmt.Errorf("circular $ref detected in schema at pointer 0x%x, depth %d", schemaPtr, depth)
 	}
 	visited[schemaPtr] = true
-	defer delete(visited, schemaPtr)
 
 	// Convert Ref
 	if schema.Ref.String() != "" {
@@ -335,13 +330,19 @@ func convertOpenAPI3SchemaRefsInternal(schema *spec.Schema, visited map[uintptr]
 		schema.Extensions[xNullable] = true
 	}
 
+	var err error
+
 	// Recursively convert items
 	if schema.Items != nil && schema.Items.Schema != nil {
-		convertOpenAPI3SchemaRefsInternal(schema.Items.Schema, visited, depth+1)
+		if err = convertOpenAPI3SchemaRefsInternal(schema.Items.Schema, visited, depth+1); err != nil {
+			return err
+		}
 	}
 	if schema.Items != nil && len(schema.Items.Schemas) > 0 {
 		for i := range schema.Items.Schemas {
-			convertOpenAPI3SchemaRefsInternal(&schema.Items.Schemas[i], visited, depth+1)
+			if err = convertOpenAPI3SchemaRefsInternal(&schema.Items.Schemas[i], visited, depth+1); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -349,39 +350,53 @@ func convertOpenAPI3SchemaRefsInternal(schema *spec.Schema, visited map[uintptr]
 	if schema.Properties != nil {
 		for name := range schema.Properties {
 			prop := schema.Properties[name]
-			convertOpenAPI3SchemaRefsInternal(&prop, visited, depth+1)
+			if err = convertOpenAPI3SchemaRefsInternal(&prop, visited, depth+1); err != nil {
+				return err
+			}
 			schema.Properties[name] = prop
 		}
 	}
 
 	// Recursively convert additionalProperties
 	if schema.AdditionalProperties != nil && schema.AdditionalProperties.Schema != nil {
-		convertOpenAPI3SchemaRefsInternal(schema.AdditionalProperties.Schema, visited, depth+1)
+		if err = convertOpenAPI3SchemaRefsInternal(schema.AdditionalProperties.Schema, visited, depth+1); err != nil {
+			return err
+		}
 	}
 
 	// Recursively convert allOf
 	if len(schema.AllOf) > 0 {
 		for i := range schema.AllOf {
-			convertOpenAPI3SchemaRefsInternal(&schema.AllOf[i], visited, depth+1)
+			if err = convertOpenAPI3SchemaRefsInternal(&schema.AllOf[i], visited, depth+1); err != nil {
+				return err
+			}
 		}
 	}
 
 	// Recursively convert anyOf
 	if len(schema.AnyOf) > 0 {
 		for i := range schema.AnyOf {
-			convertOpenAPI3SchemaRefsInternal(&schema.AnyOf[i], visited, depth+1)
+			if err = convertOpenAPI3SchemaRefsInternal(&schema.AnyOf[i], visited, depth+1); err != nil {
+				return err
+			}
 		}
 	}
 
 	// Recursively convert oneOf
 	if len(schema.OneOf) > 0 {
 		for i := range schema.OneOf {
-			convertOpenAPI3SchemaRefsInternal(&schema.OneOf[i], visited, depth+1)
+			if err = convertOpenAPI3SchemaRefsInternal(&schema.OneOf[i], visited, depth+1); err != nil {
+				return err
+			}
 		}
 	}
 
 	// Recursively convert not
 	if schema.Not != nil {
-		convertOpenAPI3SchemaRefsInternal(schema.Not, visited, depth+1)
+		if err = convertOpenAPI3SchemaRefsInternal(schema.Not, visited, depth+1); err != nil {
+			return err
+		}
 	}
+
+	return nil
 }

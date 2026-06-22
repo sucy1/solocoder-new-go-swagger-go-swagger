@@ -399,12 +399,12 @@ func validateRefExistence(swspec *spec.Swagger) []string {
 									"$ref to non-existent response %q at %s default response",
 									defaultResp.Ref.String(), location))
 							}
-							continue
+						} else {
+							respCopy := *defaultResp
+							errs = append(errs, validateResponseRefs(&respCopy, fmt.Sprintf("%s default", location), "operation response",
+								availableDefinitions, availableParams, availableResponses,
+								visitedSchemas, visitedParams, visitedResponses)...)
 						}
-						respCopy := *defaultResp
-						errs = append(errs, validateResponseRefs(&respCopy, fmt.Sprintf("%s default", location), "operation response",
-							availableDefinitions, availableParams, availableResponses,
-							visitedSchemas, visitedParams, visitedResponses)...)
 					}
 
 					// Validate status code responses
@@ -446,10 +446,10 @@ func validateSchemaRefs(schema *spec.Schema, contextName, contextType string,
 
 	// Check for circular reference
 	if visitedSchemas[s] {
+		errs = append(errs, fmt.Sprintf("circular $ref detected in %s %q (schema already visited)", contextType, contextName))
 		return errs
 	}
 	visitedSchemas[s] = true
-	defer delete(visitedSchemas, s)
 
 	// Validate schema $ref
 	if s.Ref.String() != "" {
@@ -538,10 +538,10 @@ func validateParameterRefs(param *spec.Parameter, contextName, contextType strin
 	}
 
 	if visitedParams[p] {
+		errs = append(errs, fmt.Sprintf("circular $ref detected in %s %q (parameter already visited)", contextType, contextName))
 		return errs
 	}
 	visitedParams[p] = true
-	defer delete(visitedParams, p)
 
 	// Validate parameter schema
 	if p.Schema != nil {
@@ -567,10 +567,10 @@ func validateResponseRefs(resp *spec.Response, contextName, contextType string,
 	}
 
 	if visitedResponses[r] {
+		errs = append(errs, fmt.Sprintf("circular $ref detected in %s %q (response already visited)", contextType, contextName))
 		return errs
 	}
 	visitedResponses[r] = true
-	defer delete(visitedResponses, r)
 
 	// Validate response schema
 	if r.Schema != nil {
